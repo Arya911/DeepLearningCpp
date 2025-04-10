@@ -121,6 +121,29 @@ vector<vector<vector<double>>> unflatten(const vector<double> &input, int channe
     return output;
 }
 
+// --- Folding operation ---
+// This function implements a vertical fold that splits the image into top and bottom halves,
+// then concatenates them along the width dimension. For a HxW image, the output is (H/2)x(2W).
+vector<vector<double>> foldImageVertical(const vector<vector<double>> &image) {
+    int H = image.size();
+    int W = image[0].size();
+    assert(H % 2 == 0); // For simplicity, we assume H is even.
+    int newH = H / 2;
+    int newW = W * 2;
+    vector<vector<double>> folded(newH, vector<double>(newW, 0.0));
+    for (int i = 0; i < newH; i++) {
+        // Copy top half into the first W columns.
+        for (int j = 0; j < W; j++) {
+            folded[i][j] = image[i][j];
+        }
+        // Copy bottom half into the next W columns.
+        for (int j = 0; j < W; j++) {
+            folded[i][j + W] = image[i + newH][j];
+        }
+    }
+    return folded;
+}
+
 class ConvLayer {
 public:
     int num_filters, filter_size;
@@ -129,6 +152,7 @@ public:
     vector<vector<vector<double>>> last_input;
     vector<vector<vector<double>>> last_conv;
 
+    // For multi-channel support (if needed) you could extend this class.
     ConvLayer(int num_filters, int filter_size, double lr)
         : num_filters(num_filters), filter_size(filter_size), learning_rate(lr) {
         filters.resize(num_filters, vector<vector<double>>(filter_size, vector<double>(filter_size)));
@@ -327,27 +351,36 @@ int main() {
     vector<int> train_labels = load_mnist_labels("train-labels.idx1-ubyte");
     cout << "Loaded " << train_images.size() << " training images." << endl;
 
-    // Build the network:
-    // Input: 28x28 image (single channel)
-    // Convolution: 8 filters of size 3x3 → output size: 28-3+1 = 26 → [8 x 26 x 26]
-    // ReLU activation is applied inside the conv layer.
-    // Max Pooling: 2x2 → output size: 26/2 = 13 → [8 x 13 x 13]
-    // Flatten: 8 * 13 * 13 = 1352
-    // Fully Connected Layer: 1352 → 10 (class scores)
-    // Softmax and cross-entropy loss used for training.
+    // --- Preprocessing: Folding ---
+    // We perform a vertical fold on each image.
+    // For a 28x28 image, the folded image becomes 14x56.
+    vector<vector<vector<double>>> folded_images;
+    for (size_t i = 0; i < train_images.size(); i++) {
+        // Since MNIST images are single-channel, extract the 2D image:
+        vector<vector<double>> image = train_images[i];
+        vector<vector<double>> folded = foldImageVertical(image);
+        folded_images.push_back(folded);
+    }
 
+    // --- Build the network ---
+    // After folding:
+    // Input: 14x56 image (single channel)
+    // Convolution: 8 filters of size 3x3 → output size: 14-3+1 = 12 (height) x (56-3+1 = 54 width) → [8 x 12 x 54]
+    // Max Pooling: 2x2 → output size: 12/2 = 6 x 54/2 = 27 → [8 x 6 x 27]
+    // Flatten: 8 * 6 * 27 = 1296
+    // Fully Connected Layer: 1296 → 10 (class scores)
     double conv_lr = 0.001;
     double fc_lr = 0.001;
     int num_filters = 8;
     int filter_size = 3;
     ConvLayer conv(num_filters, filter_size, conv_lr);
     MaxPoolLayer pool(2);
-    int fc_input_size = num_filters * 13 * 13;
+    int fc_input_size = num_filters * 6 * 27; // 8 * 6 * 27 = 1296
     int num_classes = 10;
     FCLayer fc(fc_input_size, num_classes, fc_lr);
 
     int epochs = 30;  
-    int num_samples = train_images.size();
+    int num_samples = folded_images.size();
     double total_loss = 0.0;
     int correct = 0;
 
@@ -356,7 +389,7 @@ int main() {
         total_loss = 0.0;
         correct = 0;
         for (int idx = 0; idx < num_samples; idx++) {
-            vector<vector<double>> image = train_images[idx];
+            vector<vector<double>> image = folded_images[idx];
             int label = train_labels[idx];
 
             vector<vector<vector<double>>> conv_out = conv.forward(image);
@@ -373,12 +406,9 @@ int main() {
 
             vector<double> d_loss = d_softmax_cross_entropy(probs, label); // Gradient at fc layer output
             vector<double> d_fc = fc.backward(d_loss);  // Backprop through fully connected layer
-            vector<vector<vector<double>>> d_pool = unflatten(d_fc, num_filters, 13, 13);
+            vector<vector<vector<double>>> d_pool = unflatten(d_fc, num_filters, 6, 27);
             vector<vector<vector<double>>> d_conv = pool.backward(d_pool);
             conv.backward(d_conv);
-
-            // if ((idx + 1) % 1000 == 0)
-            //     cout << "Processed " << idx + 1 << " samples." << endl;
         }
         double avg_loss = total_loss / num_samples;
         double accuracy = (double)correct / num_samples * 100;
